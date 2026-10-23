@@ -1,0 +1,75 @@
+<!doctype html><html><head><meta charset="utf-8"><title>GPU Fur Simulation – Remix</title>
+<style>body{margin:0;overflow:hidden;background:#111;font:12px system-ui;color:#ddd}#ui{position:absolute;top:8px;left:8px;background:#000a;padding:8px;border-radius:6px;width:250px;max-height:95vh;overflow:auto}
+label{display:flex;justify-content:space-between;margin-top:4px}input[type=range]{width:100%}#stats{position:absolute;right:8px;top:8px;background:#000a;padding:6px;border-radius:6px}</style>
+<script type="importmap">{"imports":{"three":"./three.module.js"}}</script></head><body>
+<div id="ui"><b>Fur remix</b> (left-drag = push fur, right-drag = orbit)<br>
+<label>Surface<select id="surface"><option>sphere</option><option>plane</option><option>torus</option><option value="knot">torus knot (mesh)</option></select></label><div id="ctl"></div>
+<label>Colour<input type="color" id="color" value="#c8894f"></label><label>Tip colour<input type="color" id="tip" value="#f3dcb5"></label>
+<button id="reset">Reset defaults</button></div><div id="stats"></div>
+<script type="module">
+import * as THREE from 'three';import {OrbitControls} from './OrbitControls.js';
+// Bounded controls: [key,label,min,max,default,step]. Ranges documented in README.md
+const C=[['density','Strand density (strands/UV unit)',50,600,260,10],['length','Fur length (world units)',0.02,0.5,0.18,0.01],
+['shells','Shell count',8,96,48,1],['stiffness','Stiffness k (1/s²)',5,400,80,1],['damping','Damping c (1/s)',0.5,30,6,0.5],
+['gravity','Gravity (m/s²)',0,20,9.8,0.1],['wind','Wind strength',0,30,4,0.5],['windDir','Wind direction (deg)',0,360,30,1],
+['turb','Wind turbulence',0,1,0.5,0.05],['thick','Strand thickness',0.1,0.9,0.55,0.05],['push','Pointer push strength',0,80,30,1],
+['radius','Pointer radius',0.05,1,0.35,0.05],['curl','Tip droop exponent',1,3,2,0.1]];
+const P={};const ctl=document.getElementById('ctl');
+for(const [k,l,mn,mx,d,s] of C){P[k]=d;const w=document.createElement('label');w.innerHTML=`${l} <span id=v_${k}>${d}</span>`;
+const i=document.createElement('input');Object.assign(i,{type:'range',min:mn,max:mx,step:s,value:d,id:'r_'+k});
+i.oninput=()=>{P[k]=Math.min(mx,Math.max(mn,+i.value));document.getElementById('v_'+k).textContent=P[k];if(k==='shells')mesh&&(mesh.count=P.shells)};ctl.append(w,i);}
+document.getElementById('reset').onclick=()=>{for(const [k,,,,d] of C){const i=document.getElementById('r_'+k);i.value=d;i.oninput()}};
+const r=new THREE.WebGLRenderer({antialias:true,preserveDrawingBuffer:true});r.setSize(innerWidth,innerHeight);r.setPixelRatio(Math.min(devicePixelRatio,2));document.body.append(r.domElement);
+const scene=new THREE.Scene();scene.background=new THREE.Color(0x15171c);const cam=new THREE.PerspectiveCamera(45,innerWidth/innerHeight,0.05,100);cam.position.set(0,0.8,3.2);
+const oc=new OrbitControls(cam,r.domElement);oc.mouseButtons={LEFT:null,MIDDLE:THREE.MOUSE.DOLLY,RIGHT:THREE.MOUSE.ROTATE};oc.minDistance=1.5;oc.maxDistance=8;
+const MAXSH=96;const U={uLen:{value:0},uShells:{value:48},uDensity:{value:0},uThick:{value:0},uCurl:{value:2},uColor:{value:new THREE.Color()},uTip:{value:new THREE.Color()},uLight:{value:new THREE.Vector3(0.5,0.8,0.6).normalize()}};
+const mat=new THREE.ShaderMaterial({glslVersion:THREE.GLSL3,uniforms:U,side:THREE.DoubleSide,
+vertexShader:`in vec3 offset;uniform float uLen,uShells,uCurl;out float h;out vec2 vUv;out vec3 vT,vN,vW;
+void main(){h=float(gl_InstanceID)/uShells;vec3 n=normalize(normal);vec3 off=offset*pow(h,uCurl);
+vec3 p=position+n*uLen*h+off;vUv=uv;vN=normalize(normalMatrix*n);vT=normalize(normalMatrix*(n*uLen+offset*uCurl*pow(h,uCurl-1.)));
+vec4 w=modelMatrix*vec4(p,1.);vW=w.xyz;gl_Position=projectionMatrix*viewMatrix*w;}`,
+fragmentShader:`in float h;in vec2 vUv;in vec3 vT,vN,vW;uniform float uDensity,uThick;uniform vec3 uColor,uTip,uLight;out vec4 o;
+float hash(vec2 p){return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453);}
+void main(){vec2 g=vUv*vec2(uDensity*2.,uDensity);vec2 c=floor(g);float rnd=mix(.55,1.,hash(c));vec2 l=fract(g)-.5;
+if(h>0.0){if(h>rnd)discard;if(length(l)>uThick*(1.-h/rnd)*.5+0.02)discard;}
+vec3 T=normalize(vT);vec3 V=normalize(cameraPosition-vW);vec3 H=normalize(uLight+V);
+float tl=dot(T,uLight),th=dot(T,H);float diff=sqrt(max(0.,1.-tl*tl));float spec=pow(sqrt(max(0.,1.-th*th)),80.);// Kajiya-Kay
+float ao=mix(.25,1.,h);vec3 col=mix(uColor,uTip,h*h);o=vec4(col*(.25+.75*diff)*ao+vec3(.25)*spec*h,1.);}`});
+let mesh,geo,N,pos,nrm,off,vel,attr;const ray=new THREE.Raycaster(),mp=new THREE.Vector2();let hit=null,down=false;
+function build(kind){if(mesh){scene.remove(mesh);geo.dispose()}
+geo=kind==='plane'?new THREE.PlaneGeometry(2.4,2.4,96,96).rotateX(-Math.PI/2):kind==='torus'?new THREE.TorusGeometry(0.8,0.35,64,128):kind==='knot'?new THREE.TorusKnotGeometry(0.6,0.22,256,32):new THREE.SphereGeometry(1,128,96);
+N=geo.attributes.position.count;pos=geo.attributes.position.array;nrm=geo.attributes.normal.array;off=new Float32Array(N*3);vel=new Float32Array(N*3);
+attr=new THREE.BufferAttribute(off,3);attr.setUsage(THREE.DynamicDrawUsage);geo.setAttribute('offset',attr);
+mesh=new THREE.InstancedMesh(geo,mat,MAXSH);mesh.count=P.shells;mesh.frustumCulled=false;for(let i=0;i<MAXSH;i++)mesh.setMatrixAt(i,new THREE.Matrix4());scene.add(mesh);}
+build('sphere');document.getElementById('surface').onchange=e=>build(e.target.value);
+const pick=new THREE.Mesh();addEventListener('resize',()=>{cam.aspect=innerWidth/innerHeight;cam.updateProjectionMatrix();r.setSize(innerWidth,innerHeight)});
+r.domElement.addEventListener('pointerdown',e=>{if(e.button===0)down=true});addEventListener('pointerup',()=>{down=false;hit=null});
+r.domElement.addEventListener('pointermove',e=>{mp.set(e.clientX/innerWidth*2-1,-e.clientY/innerHeight*2+1);if(!down)return;
+ray.setFromCamera(mp,cam);pick.geometry=geo;const h=ray.intersectObject(pick)[0];hit=h?{p:h.point,d:ray.ray.direction.clone()}:null});
+const stats=document.getElementById('stats');let last=performance.now(),fps=0,t=0,maxRatio=0,nan=false;
+function sim(dt){// semi-implicit Euler damped spring per strand tip; substeps keep dt*sqrt(k)<0.5
+const k=P.stiffness,c=P.damping,L=P.length;const sub=Math.max(1,Math.ceil(dt*Math.sqrt(k)/0.5));const h=dt/sub;
+const a=P.windDir*Math.PI/180;const wx=Math.cos(a),wz=Math.sin(a);const g=P.gravity*0.5,ws=P.wind*0.5,ps=P.push*0.5,R=P.radius;maxRatio=0;
+for(let i=0;i<N;i++){const j=i*3;const x=pos[j],y=pos[j+1],z=pos[j+2];
+const gust=ws*(1-P.turb+P.turb*(0.5+0.5*Math.sin(t*2.3+x*3+z*2)*Math.sin(t*1.7+y*4)));
+let fx=wx*gust,fy=-g,fz=wz*gust;
+if(hit){const dx=x-hit.p.x,dy=y-hit.p.y,dz=z-hit.p.z;const d2=dx*dx+dy*dy+dz*dz;if(d2<R*R){const f=ps*(1-Math.sqrt(d2)/R);fx+=hit.d.x*f;fy+=hit.d.y*f;fz+=hit.d.z*f;}}
+const nx=nrm[j],ny=nrm[j+1],nz=nrm[j+2];
+for(let s=0;s<sub;s++){let ox=off[j],oy=off[j+1],oz=off[j+2];
+vel[j]+=(fx-k*ox*1-c*vel[j])*h;vel[j+1]+=(fy-k*oy-c*vel[j+1])*h;vel[j+2]+=(fz-k*oz-c*vel[j+2])*h;
+ox+=vel[j]*h;oy+=vel[j+1]*h;oz+=vel[j+2]*h;
+// surface collision: strand tip may not go below surface tangent plane (keep outward normal component >= -0.8L)
+const dn=ox*nx+oy*ny+oz*nz;if(dn<-0.8*L){const cc=-0.8*L-dn;ox+=nx*cc;oy+=ny*cc;oz+=nz*cc;const vn=vel[j]*nx+vel[j+1]*ny+vel[j+2]*nz;if(vn<0){vel[j]-=vn*nx;vel[j+1]-=vn*ny;vel[j+2]-=vn*nz}}
+// length bound: offset magnitude <= 1.2*L (prevents stretching)
+const m=Math.hypot(ox,oy,oz),M=1.2*L;if(m>M){const sc=M/m;ox*=sc;oy*=sc;oz*=sc}
+off[j]=ox;off[j+1]=oy;off[j+2]=oz;}
+const rr=Math.hypot(off[j],off[j+1],off[j+2])/L;if(rr>maxRatio)maxRatio=rr;if(rr!==rr)nan=true;}
+attr.needsUpdate=true;}
+function loop(now){const dt=Math.min(0.033,(now-last)/1000);last=now;t+=dt;fps=fps*0.95+0.05/(dt||0.016);
+Object.assign(U.uLen,{value:P.length});U.uShells.value=P.shells;U.uDensity.value=P.density;U.uThick.value=P.thick;U.uCurl.value=P.curl;
+U.uColor.value.set(document.getElementById('color').value);U.uTip.value.set(document.getElementById('tip').value);
+const t0=performance.now();sim(dt);const simMs=performance.now()-t0;oc.update();r.render(scene,cam);
+window.__furStats={fps:+fps.toFixed(1),simMs:+simMs.toFixed(2),verts:N,shells:P.shells,maxOffsetOverLength:+maxRatio.toFixed(3),nan};
+stats.textContent=`${fps.toFixed(0)} fps | sim ${simMs.toFixed(1)} ms | ${N} roots × ${P.shells} shells | max off/L ${maxRatio.toFixed(2)}`;requestAnimationFrame(loop);}
+requestAnimationFrame(loop);
+</script></body></html>
